@@ -1,2 +1,370 @@
-# Sumit_1gam_e
-1 game 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>2D Arcade Racing</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #111;
+    overflow: hidden;
+    font-family: Arial, sans-serif;
+    touch-action: none;
+    user-select: none;
+  }
+  #wrap {
+    width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+  }
+  canvas {
+    display: block;
+    background: #3c3c3c;
+    touch-action: none;
+    max-height: 100vh;
+    max-width: 100vw;
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+
+<script>
+(() => {
+"use strict";
+
+// ---------------- Canvas setup ----------------
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+
+// Logical game size (portrait)
+const W = 480;
+const H = 720;
+
+// Scale to fit screen while keeping aspect ratio
+function resize() {
+  const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.width  = W;
+  canvas.height = H;
+  canvas.style.width  = (W * scale) + "px";
+  canvas.style.height = (H * scale) + "px";
+}
+window.addEventListener("resize", resize);
+window.addEventListener("orientationchange", () => setTimeout(resize, 100));
+resize();
+
+// ---------------- Constants ----------------
+const ROAD_LEFT   = 100;
+const ROAD_RIGHT  = W - 100;
+const ROAD_WIDTH  = ROAD_RIGHT - ROAD_LEFT;
+const LANE_COUNT  = 2;
+const LANE_WIDTH  = ROAD_WIDTH / LANE_COUNT;
+const LANE_CENTERS = [
+  ROAD_LEFT + LANE_WIDTH * 0.5,
+  ROAD_LEFT + LANE_WIDTH * 1.5
+];
+
+const PLAYER_W = 46, PLAYER_H = 78;
+const ENEMY_W  = 46, ENEMY_H  = 78;
+const PLAYER_SPEED = 6;
+const PLAYER_START_Y = H - 130;
+
+const COLORS = {
+  white: "#ffffff", black: "#000000",
+  gray: "#3c3c3c", darkGray: "#282828",
+  green: "#00c800", darkGreen: "#007800",
+  red: "#dc1e1e", darkRed: "#8c1414",
+  yellow: "#ffdc00", glass: "#b4dcff"
+};
+
+// ---------------- Input state ----------------
+const input = { left:false, right:false, up:false, down:false };
+
+// Keyboard (desktop testing)
+window.addEventListener("keydown", e => {
+  if (e.key === "ArrowLeft")  input.left  = true;
+  if (e.key === "ArrowRight") input.right = true;
+  if (e.key === "ArrowUp")    input.up    = true;
+  if (e.key === "ArrowDown")  input.down  = true;
+  if (e.key === "r" || e.key === "R") { if (game.over) game.reset(); }
+});
+window.addEventListener("keyup", e => {
+  if (e.key === "ArrowLeft")  input.left  = false;
+  if (e.key === "ArrowRight") input.right = false;
+  if (e.key === "ArrowUp")    input.up    = false;
+  if (e.key === "ArrowDown")  input.down  = false;
+});
+
+// Touch controls: 4 invisible zones on screen
+function setTouches(e) {
+  e.preventDefault();
+  input.left = input.right = input.up = input.down = false;
+  const rect = canvas.getBoundingClientRect();
+  for (const t of e.touches) {
+    const x = (t.clientX - rect.left) / rect.width;
+    const y = (t.clientY - rect.top)  / rect.height;
+    if (x < 0.5) input.left  = true;
+    else         input.right = true;
+    if (y < 0.5) input.up    = true;
+    else         input.down  = true;
+  }
+}
+canvas.addEventListener("touchstart", e => { setTouches(e); if (game.over) tryRestart(e); }, {passive:false});
+canvas.addEventListener("touchmove",  setTouches, {passive:false});
+canvas.addEventListener("touchend",   setTouches, {passive:false});
+canvas.addEventListener("touchcancel",setTouches, {passive:false});
+
+// Mouse fallback for testing on desktop browser
+let mouseDown = false;
+canvas.addEventListener("mousedown", e => {
+  mouseDown = true;
+  if (game.over) { tryRestart(e); return; }
+  handlePointer(e.clientX, e.clientY);
+});
+canvas.addEventListener("mousemove", e => { if (mouseDown) handlePointer(e.clientX, e.clientY); });
+canvas.addEventListener("mouseup", () => { mouseDown = false; input.left=input.right=input.up=input.down=false; });
+
+function handlePointer(cx, cy) {
+  const rect = canvas.getBoundingClientRect();
+  const x = (cx - rect.left) / rect.width;
+  const y = (cy - rect.top)  / rect.height;
+  input.left  = x < 0.5;
+  input.right = x >= 0.5;
+  input.up    = y < 0.5;
+  input.down  = y >= 0.5;
+}
+
+// ---------------- Drawing helpers ----------------
+function roundRect(x, y, w, h, r, fill, stroke, lw) {
+  ctx.beginPath();
+  const rr = Math.min(r, w/2, h/2);
+  ctx.moveTo(x+rr, y);
+  ctx.arcTo(x+w, y,   x+w, y+h, rr);
+  ctx.arcTo(x+w, y+h, x,   y+h, rr);
+  ctx.arcTo(x,   y+h, x,   y,   rr);
+  ctx.arcTo(x,   y,   x+w, y,   rr);
+  ctx.closePath();
+  if (fill)   { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw || 2; ctx.stroke(); }
+}
+
+function drawCar(x, y, w, h, body, dark) {
+  // Body
+  roundRect(x, y, w, h, 8, body, dark, 3);
+  // Windshield (front)
+  roundRect(x+6, y+8, w-12, 18, 4, COLORS.glass);
+  // Rear window
+  roundRect(x+6, y+h-26, w-12, 16, 4, COLORS.glass);
+  // Headlights
+  ctx.fillStyle = COLORS.yellow;
+  ctx.fillRect(x+4, y+2, 8, 5);
+  ctx.fillRect(x+w-12, y+2, 8, 5);
+  // Taillights
+  ctx.fillStyle = "#ff5050";
+  ctx.fillRect(x+4, y+h-6, 8, 4);
+  ctx.fillRect(x+w-12, y+h-6, 8, 4);
+}
+
+// ---------------- Game objects ----------------
+function makePlayer() {
+  return {
+    x: LANE_CENTERS[0] - PLAYER_W/2,
+    y: PLAYER_START_Y,
+    w: PLAYER_W,
+    h: PLAYER_H
+  };
+}
+
+function makeEnemy(score) {
+  const lane = LANE_CENTERS[Math.floor(Math.random() * LANE_COUNT)];
+  const speedUp = 1 + Math.min(score * 0.02, 1.5);
+  return {
+    x: lane - ENEMY_W/2,
+    y: -ENEMY_H - Math.random() * 100,
+    w: ENEMY_W,
+    h: ENEMY_H,
+    speed: 4 * speedUp,
+    passed: false
+  };
+}
+
+function rectsOverlap(a, b) {
+  return a.x < b.x + b.w &&
+         a.x + a.w > b.x &&
+         a.y < b.y + b.h &&
+         a.y + a.h > b.y;
+}
+
+// ---------------- Game state ----------------
+const game = {
+  player: makePlayer(),
+  enemies: [],
+  score: 0,
+  roadScroll: 0,
+  lastSpawn: 0,
+  over: false,
+  reset() {
+    this.player = makePlayer();
+    this.enemies = [];
+    this.score = 0;
+    this.roadScroll = 0;
+    this.lastSpawn = performance.now();
+    this.over = false;
+    this.restartBtn = makeRestartBtn();
+  }
+};
+
+function makeRestartBtn() {
+  return { x: W/2 - 110, y: H/2 + 60, w: 220, h: 60 };
+}
+game.restartBtn = makeRestartBtn();
+
+// ---------------- Update ----------------
+function update(dt, now) {
+  if (game.over) return;
+
+  // Scroll road markings
+  game.roadScroll = (game.roadScroll + 8 * dt * 60 / 1000) % 70;
+
+  // Player movement
+  if (input.left)  game.player.x -= PLAYER_SPEED;
+  if (input.right) game.player.x += PLAYER_SPEED;
+  if (input.up)    game.player.y -= 3;
+  if (input.down)  game.player.y += 3;
+
+  // Clamp
+  const p = game.player;
+  if (p.x < ROAD_LEFT + 4) p.x = ROAD_LEFT + 4;
+  if (p.x > ROAD_RIGHT - p.w - 4) p.x = ROAD_RIGHT - p.w - 4;
+  if (p.y < 60) p.y = 60;
+  if (p.y > H - p.h - 10) p.y = H - p.h - 10;
+
+  // Spawn enemies
+  const interval = Math.max(350, 900 - game.score * 6);
+  if (now - game.lastSpawn >= interval) {
+    game.enemies.push(makeEnemy(game.score));
+    game.lastSpawn = now;
+  }
+
+  // Update enemies + collisions
+  const pRect = { x: p.x, y: p.y, w: p.w, h: p.h };
+  for (let i = game.enemies.length - 1; i >= 0; i--) {
+    const e = game.enemies[i];
+    e.y += e.speed;
+
+    if (rectsOverlap(pRect, e)) {
+      game.over = true;
+      return;
+    }
+    if (!e.passed && e.y > pRect.y + pRect.h) {
+      e.passed = true;
+      game.score++;
+    }
+    if (e.y > H + 50) game.enemies.splice(i, 1);
+  }
+}
+
+// ---------------- Render ----------------
+function render() {
+  // Asphalt
+  ctx.fillStyle = COLORS.gray;
+  ctx.fillRect(0, 0, W, H);
+
+  // Grass sides
+  ctx.fillStyle = COLORS.darkGray;
+  ctx.fillRect(0, 0, ROAD_LEFT, H);
+  ctx.fillRect(ROAD_RIGHT, 0, W - ROAD_RIGHT, H);
+
+  // Road edge lines
+  ctx.fillStyle = COLORS.white;
+  ctx.fillRect(ROAD_LEFT - 3, 0, 3, H);
+  ctx.fillRect(ROAD_RIGHT, 0, 3, H);
+
+  // Center dashed line
+  ctx.fillStyle = COLORS.black;
+  const centerX = ROAD_LEFT + LANE_WIDTH;
+  let y = -40 + game.roadScroll;
+  while (y < H) {
+    ctx.fillRect(centerX - 3, y, 6, 40);
+    y += 70;
+  }
+
+  // Enemies
+  for (const e of game.enemies) {
+    drawCar(e.x, e.y, e.w, e.h, COLORS.red, COLORS.darkRed);
+  }
+
+  // Player
+  if (!game.over) {
+    drawCar(game.player.x, game.player.y, game.player.w, game.player.h,
+            COLORS.green, COLORS.darkGreen);
+  }
+
+  // HUD
+  ctx.fillStyle = COLORS.white;
+  ctx.font = "bold 32px Arial";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillText("SCORE: " + game.score, 15, 12);
+
+  ctx.font = "18px Arial";
+  ctx.fillText("Tap: left/right = steer, top = gas, bottom = brake", 15, 50);
+
+  // Game over overlay
+  if (game.over) {
+    ctx.fillStyle = "rgba(0,0,0,0.78)";
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = COLORS.red;
+    ctx.font = "bold 56px Arial";
+    ctx.fillText("GAME OVER", W/2, H/2 - 130);
+
+    ctx.fillStyle = COLORS.white;
+    ctx.font = "bold 30px Arial";
+    ctx.fillText("Final Score: " + game.score, W/2, H/2 - 40);
+
+    // Restart button
+    const b = game.restartBtn;
+    roundRect(b.x, b.y, b.w, b.h, 10, "#1ea01e", "#ffffff", 3);
+    ctx.fillStyle = COLORS.white;
+    ctx.font = "bold 28px Arial";
+    ctx.fillText("TAP TO RESTART", W/2, b.y + 18);
+  }
+}
+
+// Try to restart if tapped button (or anywhere)
+function tryRestart(e) {
+  if (!game.over) return;
+  const rect = canvas.getBoundingClientRect();
+  const cx = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+  const cy = (e.touches ? e.touches[0].clientY : e.clientY) - rect.top;
+  const x = cx / rect.width  * W;
+  const y = cy / rect.height * H;
+  const b = game.restartBtn;
+  // Allow tap anywhere on lower half to restart (easier on mobile)
+  if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+    game.reset();
+  } else if (y > H / 2) {
+    game.reset();
+  }
+}
+
+// ---------------- Main loop ----------------
+let lastTime = performance.now();
+function loop(now) {
+  const dt = Math.min(now - lastTime, 50);
+  lastTime = now;
+  update(dt, now);
+  render();
+  requestAnimationFrame(loop);
+}
+
+game.reset();
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
